@@ -124,8 +124,8 @@
         ;; New listing path with enhanced validation
         (let ((owner-result (contract-call? nft get-owner? token-id)))
           (match owner-result
-            owner-response
-              (match owner-response
+            owner-ok
+              (match owner-ok
                 owner-principal
                   (if (is-eq owner-principal tx-sender)
                       ;; Verify NFT transfer with better error handling
@@ -145,8 +145,8 @@
                           (err ERR-ESCROW-FAILED))
                       (err ERR-NOT-OWNER))
                 (err ERR-NOT-OWNER))
-            query-error
-              (err ERR-NOT-OWNER))))))
+            owner-error
+              (err owner-error))))))
       
       ;; Clear reentrancy guard before returning
       (clear-reentrancy)
@@ -209,8 +209,8 @@
                 
                 ;; Verify escrow state before payment
                 (match (contract-call? nft get-owner? token-id)
-                  owner-response
-                    (match owner-response
+                  owner-ok
+                    (match owner-ok
                       escrow-owner
                         (if (is-eq escrow-owner (as-contract tx-sender))
                             ;; Atomic payment and state update
@@ -230,8 +230,8 @@
                                 (err ERR-STX-TRANSFER-FAILED))
                             (err ERR-NOT-ESCROWED))
                       (err ERR-NOT-ESCROWED))
-                  query-error
-                    (err ERR-NOT-ESCROWED)))
+                  owner-error
+                    (err owner-error)))
               (err ERR-ALREADY-RENTED))
         (err ERR-NOT-FOUND))))
       
@@ -241,52 +241,64 @@
 
 ;; NEW FUNCTIONALITY: Return NFT after rental expires - callable by anyone
 (define-public (return-expired-nft (nft <sip009-nft-trait>) (token-id uint))
-  (let ((opt-listing (map-get? rentals token-id)))
-    (match opt-listing
-      listing
-        (match (get renter listing)
-          renter-principal
-            (if (>= stacks-block-height (get expiry listing))
-                ;; Rental has expired, return to original owner
-                (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
-                  transfer-ok
-                    (begin
-                      ;; Clear the rental listing
-                      (map-delete rentals token-id)
-                      (ok true))
-                  transfer-err
-                    (err ERR-RETURN-FAILED))
-                (err ERR-RENTAL-NOT-EXPIRED))
-          ;; No renter means it's just listed, owner can withdraw
-          (if (is-eq tx-sender (get nft-owner listing))
-              (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
-                transfer-ok
-                  (begin
-                    (map-delete rentals token-id)
-                    (ok true))
-                transfer-err
-                  (err ERR-RETURN-FAILED))
-              (err ERR-NOT-OWNER)))
-      (err ERR-NOT-FOUND))))
+  (begin
+    (asserts! (not (var-get contract-paused)) (err ERR-CONTRACT-PAUSED))
+    (unwrap! (check-reentrancy) (err ERR-INVALID-STATE))
+    (let ((result
+      (let ((opt-listing (map-get? rentals token-id)))
+        (match opt-listing
+          listing
+            (match (get renter listing)
+              renter-principal
+                (if (>= stacks-block-height (get expiry listing))
+                    ;; Rental has expired, return to original owner
+                    (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
+                      transfer-ok
+                        (begin
+                          ;; Clear the rental listing
+                          (map-delete rentals token-id)
+                          (ok true))
+                      transfer-err
+                        (err ERR-RETURN-FAILED))
+                    (err ERR-RENTAL-NOT-EXPIRED))
+              ;; No renter means it's just listed, owner can withdraw
+              (if (is-eq tx-sender (get nft-owner listing))
+                  (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
+                    transfer-ok
+                      (begin
+                        (map-delete rentals token-id)
+                        (ok true))
+                    transfer-err
+                      (err ERR-RETURN-FAILED))
+                  (err ERR-NOT-OWNER)))
+          (err ERR-NOT-FOUND)))))
+      (clear-reentrancy)
+      result)))
 
 ;; NEW FUNCTIONALITY: Early return by renter (optional feature for flexibility)
 (define-public (early-return (nft <sip009-nft-trait>) (token-id uint))
-  (let ((opt-listing (map-get? rentals token-id)))
-    (match opt-listing
-      listing
-        (match (get renter listing)
-          renter-principal
-            (if (is-eq tx-sender renter-principal)
-                (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
-                  transfer-ok
-                    (begin
-                      (map-delete rentals token-id)
-                      (ok true))
-                  transfer-err
-                    (err ERR-RETURN-FAILED))
-                (err ERR-NOT-RENTER))
-          (err ERR-NOT-FOUND))
-      (err ERR-NOT-FOUND))))
+  (begin
+    (asserts! (not (var-get contract-paused)) (err ERR-CONTRACT-PAUSED))
+    (unwrap! (check-reentrancy) (err ERR-INVALID-STATE))
+    (let ((result
+      (let ((opt-listing (map-get? rentals token-id)))
+        (match opt-listing
+          listing
+            (match (get renter listing)
+              renter-principal
+                (if (is-eq tx-sender renter-principal)
+                    (match (contract-call? nft transfer? token-id (as-contract tx-sender) (get nft-owner listing))
+                      transfer-ok
+                        (begin
+                          (map-delete rentals token-id)
+                          (ok true))
+                      transfer-err
+                        (err ERR-RETURN-FAILED))
+                    (err ERR-NOT-RENTER))
+              (err ERR-NOT-FOUND))
+          (err ERR-NOT-FOUND)))))
+      (clear-reentrancy)
+      result)))
 
 ;; Admin functions for emergency management
 (define-public (pause-contract)
